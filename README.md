@@ -8,7 +8,9 @@ Building upon this exploratory analysis, the project scope extends into **superv
 
 **Data Source:** `AAPL.csv` from Hugging Face (`Ammok/apple_stock_price_from_1980-2021`) or similar source. (Expected columns: Date, Open, High, Low, Close, Adj Close, Volume)
 
-### Original Inception: August 2023 private repository, cloned and shared May 2025
+### Original Inception: August 2023 private repository, cloned and shared May 2025 
+
+See the [research brief](https://github.com/xas-L/AAPL-market-pattern-analysis/blob/main/research%20brief/AAPL_systematic_equity_analysis.pdf)
 
 ## Completed Analysis: Unsupervised Pattern Detection
 
