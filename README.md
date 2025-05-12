@@ -6,7 +6,7 @@ This project initially explores the historical price movements of Apple Inc. (AA
 
 Building upon this exploratory analysis, the project scope extends into **supervised predictive modelling**. The subsequent phase, detailed in the "Future Work and Research Directions" section, outlines a rigorous plan to develop and evaluate statistical and machine learning models for forecasting short-to-medium term AAPL stock returns, potentially integrating insights from textual analysis (NLP) in later stages.
 
-**Data Source:** `AAPL.csv` from Hugging Face (`Ammok/apple_stock_price_from_1980-2021`) or similar source. (Expected columns: Date, Open, High, Low, Close, Adj Close, Volume)
+**Data Source:** `AAPL.csv` from [Hugging Face](https://huggingface.co/datasets/Ammok/apple_stock_price_from_1980-2021) (`Ammok/apple_stock_price_from_1980-2021`) or similar source. (Expected columns: Date, Open, High, Low, Close, Adj Close, Volume)
 
 ### Original Inception: August 2023 private repository, cloned and shared May 2025 
 
