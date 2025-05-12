@@ -1,0 +1,259 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+import os # For creating directories
+
+# --- Utility Functions ---
+
+def load_and_prep_data(csv_path, price_column_default='Adj Close'):
+    """
+    Loads stock data from a CSV file, parses dates, sets index,
+    verifies required columns, and handles basic cleaning.
+
+    Args:
+        csv_path (str): The path to the CSV file.
+        price_column_default (str): The preferred price column ('Adj Close' or 'Close').
+
+    Returns:
+        tuple(pandas.DataFrame, str) or tuple(None, None):
+            - The prepared DataFrame.
+            - The actual price column used ('Adj Close' or 'Close').
+            Returns (None, None) if errors occur.
+    """
+    print(f"--- Loading and Preparing Data from '{csv_path}' ---")
+    price_column_used = price_column_default
+
+    try:
+        # Try reading with default UTF-8, fallback to latin1 if needed
+        try:
+            df = pd.read_csv(csv_path)
+        except UnicodeDecodeError:
+            print("UTF-8 decoding failed, trying latin1 encoding.")
+            df = pd.read_csv(csv_path, encoding='latin1')
+        print(f"CSV '{csv_path}' loaded successfully.")
+    except FileNotFoundError:
+        print(f"Error: File not found at '{csv_path}'. Please ensure the file exists.")
+        return None, None
+    except Exception as e:
+        print(f"Error loading CSV: {e}")
+        return None, None
+
+    # Date Parsing and Indexing
+    try:
+        if 'Date' not in df.columns:
+            raise KeyError("'Date' column not found. Check CSV header.")
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        invalid_dates = df['Date'].isnull().sum()
+        if invalid_dates > 0:
+            print(f"Warning: Dropping {invalid_dates} rows with invalid date formats.")
+            df.dropna(subset=['Date'], inplace=True)
+        if df.empty:
+             print("Error: No valid date entries found after parsing.")
+             return None, None
+        df = df.set_index('Date')
+        df = df.sort_index()
+        print("Date parsing and indexing successful.")
+    except KeyError as e:
+        print(f"Error: {e}")
+        return None, None
+    except Exception as e:
+        print(f"Error processing Date column: {e}")
+        return None, None
+
+    # Verify Price and Volume Columns
+    required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    if price_column_used not in df.columns:
+        if 'Close' in df.columns:
+            price_column_used = 'Close' # Fallback to 'Close'
+            print(f"Warning: '{price_column_default}' not found. Using 'Close'. Results may be affected by splits/dividends.")
+        else:
+            print(f"Error: Neither '{price_column_default}' nor 'Close' found in columns: {list(df.columns)}")
+            return None, None
+    required_cols.append(price_column_used)
+
+    missing_req_cols = [col for col in required_cols if col not in df.columns]
+    if missing_req_cols:
+        print(f"Error: Missing required columns: {missing_req_cols}")
+        return None, None
+
+    # Convert relevant columns to numeric, coercing errors
+    print("Converting OHLCV columns to numeric...")
+    for col in required_cols:
+         df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Basic Cleaning (Impute NaNs, handle potential zeros)
+    numeric_cols_to_check = ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
+    cols_to_impute = [col for col in numeric_cols_to_check if col in df.columns and df[col].isnull().any()]
+    if cols_to_impute:
+        print(f"Imputing NaNs in {cols_to_impute} using ffill then bfill.")
+        df[cols_to_impute] = df[cols_to_impute].ffill().bfill()
+        if df.isnull().values.any():
+             print("Warning: NaNs remain after imputation. Dropping rows with any remaining NaNs.")
+             df.dropna(inplace=True)
+
+    # Handle potential zero/negative values
+    if (df[price_column_used] <= 0).any():
+         print(f"Warning: Zero or negative values found in '{price_column_used}'. Clipping to 1e-6.")
+         df[price_column_used] = df[price_column_used].clip(lower=1e-6)
+    if 'Volume' in df.columns and (df['Volume'] <= 0).any():
+         print("Warning: Zero or negative values found in 'Volume'. Clipping to 1.")
+         df['Volume'] = df['Volume'].clip(lower=1)
+
+    if df.empty:
+        print("Error: DataFrame is empty after cleaning.")
+        return None, None
+
+    print("Data loading and preparation complete.")
+    return df, price_column_used
+
+def engineer_features(df, window_size, price_column):
+    """
+    Engineers time-series features based on the specified window size and price column.
+
+    Args:
+        df (pandas.DataFrame): The input DataFrame with price and volume data.
+        window_size (int): The rolling window size for calculations.
+        price_column (str): The name of the price column to use ('Adj Close' or 'Close').
+
+    Returns:
+        tuple(pandas.DataFrame, pandas.DataFrame) or tuple(None, None):
+            - df_features: DataFrame with engineered features.
+            - df_aligned: Original DataFrame aligned to the feature index.
+            Returns (None, None) if errors occur.
+    """
+    print(f"\n--- Engineering Features (Window Size: {window_size}) ---")
+    if price_column not in df.columns or 'Volume' not in df.columns:
+        print(f"Error: Required columns ('{price_column}', 'Volume') not found for feature engineering.")
+        return None, None
+    if df.empty:
+        print("Error: Input DataFrame for feature engineering is empty.")
+        return None, None
+
+    df_eng = df.copy()
+    try:
+        # Log Returns
+        df_eng['log_return'] = np.log(df_eng[price_column] / df_eng[price_column].shift(1))
+
+        # Use min_periods to handle start of series better
+        min_p = max(1, window_size // 2)
+
+        # Annualized Volatility
+        df_eng['volatility'] = df_eng['log_return'].rolling(window=window_size, min_periods=min_p).std() * np.sqrt(252)
+
+        # Annualized Momentum
+        df_eng['momentum'] = df_eng['log_return'].rolling(window=window_size, min_periods=min_p).mean() * 252
+
+        # Volume Change (Log ratio relative to rolling mean volume)
+        rolling_mean_volume = df_eng['Volume'].rolling(window=window_size, min_periods=min_p).mean()
+        # Add small epsilon to avoid log(0) or division by zero
+        df_eng['volume_log_ratio'] = np.log(df_eng['Volume'] / (rolling_mean_volume + 1e-9))
+
+        # Replace potential infinities
+        df_eng.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    except Exception as e:
+        print(f"Error during feature calculation: {e}")
+        return None, None
+
+    # Select features and handle NaNs
+    features_list = ['log_return', 'volatility', 'momentum', 'volume_log_ratio']
+    df_features = df_eng[features_list].copy()
+    initial_rows = len(df_features)
+    df_features.dropna(inplace=True)
+    final_rows = len(df_features)
+    print(f"Removed {initial_rows - final_rows} rows with NaNs after feature engineering.")
+
+    if df_features.empty:
+        print("Error: No data remaining after feature engineering and NaN removal.")
+        return None, None
+
+    # Align original data with the valid feature index
+    df_aligned = df.loc[df_features.index].copy()
+
+    print(f"Feature engineering complete. Shape: {df_features.shape}")
+    return df_features, df_aligned
+
+def scale_features(df_features):
+    """
+    Scales the features using StandardScaler.
+
+    Args:
+        df_features (pandas.DataFrame): DataFrame with features to scale.
+
+    Returns:
+        tuple(pandas.DataFrame, sklearn.preprocessing.StandardScaler) or tuple(None, None):
+            - df_scaled: DataFrame with scaled features.
+            - scaler: The fitted StandardScaler object.
+            Returns (None, None) if scaling fails.
+    """
+    print("--- Scaling Features ---")
+    if df_features is None or df_features.empty:
+        print("Error: Cannot scale empty or None features DataFrame.")
+        return None, None
+    scaler = StandardScaler()
+    try:
+        scaled_features_array = scaler.fit_transform(df_features)
+        df_scaled = pd.DataFrame(scaled_features_array, index=df_features.index, columns=df_features.columns)
+        print("Features scaled successfully.")
+        return df_scaled, scaler
+    except Exception as e:
+        print(f"Error during feature scaling: {e}")
+        return None, None
+
+def plot_results(df_plot, y_col, label_col, title, filename, plots_dir):
+    """
+    Generates and saves a scatter plot colored by labels.
+
+    Args:
+        df_plot (pandas.DataFrame): Dataframe containing data to plot.
+        y_col (str): The column name for the y-axis (e.g., price column).
+        label_col (str): The column name containing the category labels.
+        title (str): The title for the plot.
+        filename (str): The filename to save the plot (without extension).
+        plots_dir (str): The directory to save the plot in.
+    """
+    if df_plot is None or df_plot.empty or label_col not in df_plot.columns or y_col not in df_plot.columns:
+        print(f"Warning: Skipping plot '{title}' due to missing data or columns ('{label_col}', '{y_col}').")
+        return
+
+    plt.figure(figsize=(15, 7))
+    unique_labels = sorted(df_plot[label_col].unique())
+    colors = plt.cm.viridis(np.linspace(0, 1, len(unique_labels)))
+
+    for i, label in enumerate(unique_labels):
+        subset = df_plot[df_plot[label_col] == label]
+        if subset.empty:
+            continue
+
+        plot_label = f'Label {label}'
+        marker = 'o'; size = 10; plot_color = colors[i]; alpha = 0.6; zorder = 2
+
+        if label == -1 and 'anomaly' in label_col.lower():
+             plot_label = f'Anomaly ({label})'; plot_color = 'red'; size = 30; alpha = 0.7; zorder = 5
+
+        plt.scatter(subset.index, subset[y_col], color=plot_color, label=plot_label,
+                    alpha=alpha, s=size, marker=marker, zorder=zorder)
+
+    plt.title(title)
+    plt.xlabel('Date')
+    plt.ylabel(f'{y_col} (Log Scale)')
+
+    if len(unique_labels) > 10:
+        plt.legend(title=label_col.replace('_', ' ').title(), bbox_to_anchor=(1.05, 1), loc='upper left')
+    else:
+        plt.legend()
+
+    plt.yscale('log')
+    plt.grid(True, which="both", ls="--", linewidth=0.5)
+    plt.tight_layout(rect=[0, 0, 0.9, 1]) # Adjust layout
+
+    # Ensure plots directory exists
+    try:
+        os.makedirs(plots_dir, exist_ok=True)
+        save_path = os.path.join(plots_dir, f"{filename}.png")
+        plt.savefig(save_path, bbox_inches='tight')
+        print(f"Plot saved to: {save_path}")
+    except Exception as e:
+        print(f"Error saving plot '{save_path}': {e}")
+    plt.close() # Close the plot
